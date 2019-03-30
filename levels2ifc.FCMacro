@@ -1,0 +1,14 @@
+#!/usr/bin/env python3 
+# -*- coding: utf-8 -*-
+
+
+import FreeCAD, FreeCADGui, importIFC
+
+path = '/home/mf/vbMachines/' + App.ActiveDocument.Label + '_'
+
+level2ifc = lambda obj, filename: importIFC.export(obj, path + filename + '.ifc')
+
+for obj in App.ActiveDocument.Objects:
+	if 'IfcRole' in obj.PropertiesList and obj.IfcRole == 'Building Storey':
+		level2ifc(obj, obj.Label)
+

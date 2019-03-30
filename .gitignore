@@ -1,0 +1,7 @@
+*
+!.gitignore
+!duply.py
+!duplyBase.FCMacro
+!levels2ifc.FCMacro
+!selectBase.FCMacro
+!bimEdit.FCMacro

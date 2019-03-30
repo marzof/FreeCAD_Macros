@@ -1,0 +1,107 @@
+#!/usr/bin/env python3 
+# -*- coding: utf-8 -*-
+
+## Create an independent copy of selected elements, their additions 
+## and their bases.
+## If last selected element is a wire or an axis then copy is a mirror
+## of selected objects
+
+import FreeCAD, FreeCADGui, Draft
+
+def get_axis_points(ax):
+    downgraded_axis = Draft.downgrade(ax, delete=False)[0][0]
+    new_axis = Draft.upgrade(downgraded_axis, delete=True)[0][0]
+    points = [new_axis.Start, new_axis.End]
+    App.ActiveDocument.removeObject(new_axis.Name)
+    return points
+
+mirror_entities = {
+    'Draft': lambda el: [el.Start, el.End],
+    'ArchAxis': get_axis_points,
+    }
+mirror_points = None
+
+invert_align = {
+    'Left': 'Right',
+    'Right': 'Left',
+    'Center': 'Center',
+    }
+
+## Get a list of selected objects and take note of last_selected
+selection = FreeCADGui.Selection.getSelection()
+last_selected = selection[-1]
+view = FreeCADGui.ActiveDocument.ActiveView.getViewDirection()
+view_is_zenital = True if view.x == 0.0 and view.y == 0.0 \
+        and abs(view.z) == 1.0 else False
+is_mirror = True if 'Proxy' in last_selected.PropertiesList and \
+        last_selected.Proxy.__module__ in mirror_entities else False
+
+
+def object_copy(obj):
+    new_obj = App.ActiveDocument.copyObject(obj)
+    if 'Base' in obj.PropertiesList and obj.Base != None:
+        new_base = App.ActiveDocument.copyObject(obj.Base)
+    else:
+        new_base = None #new_obj ##TODO fix mirror for element without base
+    if is_mirror:
+        mirrored_base = Draft.mirror([new_base], mirror_points[0], 
+            mirror_points[1])
+        App.ActiveDocument.removeObject(new_base.Name)
+        new_base = Draft.draftify([mirrored_base])
+        ## Invert wall alignment
+        if new_obj.Proxy.__module__ == 'ArchWall' and view_is_zenital:
+            new_obj.Align = invert_align[new_obj.Align]
+            ## TODO if elevation invert alignment and z normal
+    new_obj.Base = new_base
+    return new_obj
+
+def copy_object(ob):
+    print('copying', ob.Name)
+    ## No elements are added to ob
+    if 'Additions' not in ob.PropertiesList or len(ob.Additions) == 0:
+        return object_copy(ob)
+    else:
+        new_obj = object_copy(ob)
+        new_obj.Additions = []
+        ## TODO handle subtractions too
+        for o in ob.Additions:
+            inner_obj = copy_object(o)
+            new_obj.Additions = new_obj.Additions + [inner_obj]
+            
+
+def main():
+    global mirror_points
+    if is_mirror:
+        ## last element is the mirror axis
+        selected_items = selection[:-1]
+        mirror_points = mirror_entities[last_selected.Proxy.__module__](
+                last_selected)
+    else:
+        selected_items = selection[:]
+
+    for ob in selected_items:
+        copy(ob)
+
+    ## Deselect original objetcs
+    for obj in selection:
+        FreeCADGui.Selection.removeSelection(obj)
+    App.ActiveDocument.recompute()
+
+main()
+
+## TODO add select and transform operation to duplication
+## v=Gui.activeDocument().activeView()
+## # This class logs any mouse button events.
+## # As the registered callback function fires twice for 'down' and
+## # 'up' events we need a boolean flag to handle this.
+## class ViewObserver:
+##    def logPosition(self, info):
+##        print(info)
+##        down = (info["State"] == "DOWN")
+##        pos = info["Position"]
+##        if (down):
+##            FreeCAD.Console.PrintMessage(
+##                    "Clicked on position: ("+str(pos[0])+", "+str(pos[1])+")\n")
+##        
+## o = ViewObserver()
+## c = v.addEventCallback("SoMouseButtonEvent",o.logPosition)
