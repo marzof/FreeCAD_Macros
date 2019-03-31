@@ -16,6 +16,10 @@ selected_obj_linewidth = 1.00
 selected_base_linewidth = 4.00
 selected_base_visibility = True
 
+normalize_normal = lambda obj: obj.Normal if obj.Normal != App.Vector(0,0,0) \
+        else App.Vector(0,0,1)
+
+
 def getTransparent(ob):
     if 'OriginalLineWidth' not in ob.PropertiesList:
         ob.addProperty('App::PropertyFloat', 'OriginalLineWidth')
@@ -44,7 +48,7 @@ def getVisible(ob):
     FreeCADGui.ActiveDocument.getObject(ob.Name).LineWidth = \
             selected_base_linewidth
 
-def object_copy(obj, copies_dict={}):
+def object_copy(obj, copies_dict):
     new_obj = App.ActiveDocument.copyObject(obj)
     if 'Base' in obj.PropertiesList and obj.Base != None:
         new_base = App.ActiveDocument.copyObject(obj.Base)
@@ -52,26 +56,43 @@ def object_copy(obj, copies_dict={}):
         new_base = new_obj
     new_obj.Base = new_base
     copies_dict[new_base] = new_obj
+    copies_dict['originals'].update({obj: new_obj})
     return new_obj
 
-def copy_object(ob, copies_dict={}):
+def copy_object(ob, copies_dict, sel_dict={}):
+    if 'originals' not in copies_dict:
+        copies_dict.update({'originals':{}})
+    ## if ob has no additions return its copy
     if 'Additions' not in ob.PropertiesList or len(ob.Additions) == 0:
-        return object_copy(ob, copies_dict)
+        ## it must not be an additions of something else and 
+        ## no copies of it has been done yet
+        if ob not in sel_dict['additions'] or \
+                ob not in copies_dict['originals']:
+            return object_copy(ob, copies_dict)
+        else:
+            ## if copy has been done before return that one
+            return copies_dict['originals'][ob]
     else:
+        ## if ob has addition create a copy of it and of its additions as well
+        # then add them to it
         new_obj = object_copy(ob, copies_dict)
         new_obj.Additions = []
         ## TODO handle subtractions too
         for o in ob.Additions:
-            inner_obj = copy_object(o, copies_dict)
+            inner_obj = copy_object(o, copies_dict, sel_dict)
             new_obj.Additions = new_obj.Additions + [inner_obj]
 
 def selectBase(obj_list, base_obj_dict={}):
     ''' Change element visibility (highlights bases and makes obj transparent)
-    and return a dictionary of pairs base:object '''
+    and return a dictionary of pairs base:object (and additions)'''
+
+    if 'additions' not in base_obj_dict:
+        base_obj_dict = {'additions':{}}
 
     for ob in obj_list:
         if 'Additions' in ob.PropertiesList and len(ob.Additions) > 0:
             for o in ob.Additions:
+                base_obj_dict['additions'].update({o:ob})
                 selectBase([o], base_obj_dict)
             sel_ob = ob.Base if ob.Base != None else ob
             getTransparent(ob)
@@ -159,11 +180,11 @@ class BaseTransform(Modifier):
             ## Transformation completed
             self.view.removeEventCallback("SoEvent", self.call_status)
             ## Copy self.sel and base it on new object
-            all_selected = [b for b in self.sel_dict] + \
-                [self.sel_dict[b] for b in self.sel_dict] + \
-                [b for b in self.transform.copies_dict] + \
+            all_selected = [b for b in self.sel_dict if type(b) != str] + \
+                [self.sel_dict[b] for b in self.sel_dict if type(b) != str] + \
+                [b for b in self.transform.copies_dict if type(b) != str] + \
                 [self.transform.copies_dict[b] for b in 
-                        self.transform.copies_dict]
+                        self.transform.copies_dict if type(b) != str]
             restoreOriginals(all_selected)
             App.activeDocument().recompute()
 
@@ -200,12 +221,11 @@ class Move(Modifier):
     def proceed(self):
         if self.call:
             self.view.removeEventCallback("SoEvent",self.call)
-        ## Now useless but have to check group selection
-        #self.sel = FreeCADGui.Selection.getSelection()
+        ## TODO check group selection
         #self.sel = Draft.getGroupContents(
         #    self.sel,addgroups=True,spaces=True,noarchchild=True)
-        self.sel = [b for b in self.sel_dict] + \
-                [self.sel_dict[b] for b in self.sel_dict]
+        self.sel = [b for b in self.sel_dict if type(b) != str] + \
+                [self.sel_dict[b] for b in self.sel_dict if type(b) != str]
 
         self.ui.pointUi(self.name)
         self.ui.modUi()
@@ -232,9 +252,13 @@ class Move(Modifier):
         "moving the real shape's bases"
         FreeCADGui.addModule("Draft")
         if copy:
-            for b in self.sel_dict:
-                copy_object(self.sel_dict[b], self.copies_dict)
-        to_edit = self.copies_dict if copy else self.sel_dict 
+            for b in [s for s in self.sel_dict if type(s) != str]:
+                copy_object(self.sel_dict[b], self.copies_dict, self.sel_dict)
+            to_edit = {k:self.copies_dict[k] for k in self.copies_dict \
+                    if type(k) != str}
+        else:
+            to_edit = {k:self.sel_dict[k] for k in self.sel_dict \
+                    if type(k) != str}
 
         sel = '['
         for o in to_edit:
@@ -332,8 +356,8 @@ class Rotate(Modifier):
     def proceed(self):
         if self.call:
             self.view.removeEventCallback("SoEvent",self.call)
-        self.sel = [b for b in self.sel_dict] + \
-                [self.sel_dict[b] for b in self.sel_dict]
+        self.sel = [b for b in self.sel_dict if type(b) != str] + \
+                [self.sel_dict[b] for b in self.sel_dict if type(b) != str]
         self.step = 0
         self.center = None
         self.ui.arcUi()
@@ -363,12 +387,14 @@ class Rotate(Modifier):
         "rotating the real shapes'bases"
         FreeCADGui.addModule("Draft")
         if copy:
-            for b in self.sel_dict:
-                copy_object(self.sel_dict[b], self.copies_dict)
-        to_edit = self.copies_dict if copy else self.sel_dict 
+            for b in [s for s in self.sel_dict if type(s) != str]:
+                copy_object(self.sel_dict[b], self.copies_dict, self.sel_dict)
+            to_edit = {k:self.copies_dict[k] for k in self.copies_dict \
+                    if type(k) != str}
+        else:
+            to_edit = {k:self.sel_dict[k] for k in self.sel_dict \
+                    if type(k) != str}
 
-        ## TODO for wall based on rectangles use Shape.normalAt(0,0) to 
-        ## manage Wall.Normal. Find a solution fo wall based on line 
         sel = '['
         for o in to_edit:
             if len(sel) > 1:
@@ -380,6 +406,14 @@ class Rotate(Modifier):
             ['Draft.rotate('+sel+','+str(math.degrees(angle))+','+ \
                     DraftVecUtils.toString(self.center)+',axis='+ \
                     DraftVecUtils.toString(plane.axis)+',copy=False)'])
+        for o in to_edit:
+            ob = to_edit[o]
+            ## TODO extend to other types of arch objects
+            if ob.Proxy.__module__ == 'ArchWall':
+                normal = normalize_normal(ob) 
+                rotatedNormal = DraftVecUtils.rotate(normal,angle,plane.axis)
+                ob.Normal = rotatedNormal
+                App.activeDocument().recompute()
 
     def action(self,arg):
         "scene event handler"
@@ -534,8 +568,8 @@ class Scale(Modifier):
     def proceed(self):
         if self.call:
             self.view.removeEventCallback("SoEvent",self.call)
-        self.sel = [b for b in self.sel_dict] + \
-                [self.sel_dict[b] for b in self.sel_dict]
+        self.sel = [b for b in self.sel_dict if type(b) != str] + \
+                [self.sel_dict[b] for b in self.sel_dict if type(b) != str]
         self.refs = []
         self.ui.pointUi(self.name)
         self.ui.modUi()
@@ -578,8 +612,11 @@ class Scale(Modifier):
         FreeCADGui.addModule("Draft")
         if copy:
             for b in self.sel_dict:
-                copy_object(self.sel_dict[b], self.copies_dict)
-        to_edit = self.copies_dict if copy else self.sel_dict 
+                if type(b) != str:
+                    copy_object(self.sel_dict[b], self.copies_dict,
+                            self.sel_dict)
+        to_edit = self.copies_dict if copy else \
+                {k:self.sel_dict[k] for k in self.sel_dict if type(k) != str}
 
         ## TODO handle arch object parameters
         sel = '['
