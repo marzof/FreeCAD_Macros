@@ -9,6 +9,7 @@ from FreeCAD import Vector
 from DraftTools import Modifier, msg, selectObject, plane, \
         getPoint, redraw3DView, hasMod, MODALT, DraftVecUtils
 from DraftTrackers import ghostTracker, arcTracker
+import re
 
 selection = FreeCADGui.Selection.getSelection()
 selected_obj_transparency = 80
@@ -19,6 +20,63 @@ selected_base_visibility = True
 normalize_normal = lambda obj: obj.Normal if obj.Normal != App.Vector(0,0,0) \
         else App.Vector(0,0,1)
 
+class SelectedObject:
+
+    def __init__(self, obj, sel, sel_type='main'):
+        self.obj = obj
+        self.name = obj.Name
+        self.selectionType = sel_type
+
+        #self.base = SelectedObject(obj.Base, sel, sel_type + '_base') \
+        #        if 'Base' in self.obj.PropertiesList and obj.Base else None
+        if 'Base' in self.obj.PropertiesList and obj.Base:
+            self.base = SelectedObject(obj.Base, sel, sel_type + '_base')
+        else:
+            self.base = None
+
+        self.additions = []
+        self.dependencies = {}
+        self.populateAdditions(sel)
+        self.populateDependencies(sel)
+
+        if self not in sel:
+            sel.append(self)
+
+    get_attr = lambda self, name, attr: \
+            re.search(name + '\.(.*?)(\s|$)', attr).group(1)
+
+    def populateDependencies(self, sel):
+        for dep in self.obj.InList:
+            for pair in dep.ExpressionEngine:
+                if self.name + '.' in pair[1]:
+                    local_attr = self.get_attr(self.name, pair[1])
+                    if local_attr not in self.dependencies:
+                        self.dependencies[local_attr] = []
+                    self.dependencies[local_attr].append(
+                            (SelectedObject(dep, sel, 'dependency'), pair[0]))
+
+    def populateAdditions(self, sel, obj=None):
+        if not obj:
+            obj = self.obj
+        if 'Additions' in obj.PropertiesList and len(obj.Additions) > 0:
+            for o in obj.Additions:
+                ## TODO add condition for bases and dependencies too
+                ## check this:
+                ## if (o, 'Addition') in [(s.obj, s.selectionType) for ...
+                if o not in [s.obj for s in sel]:
+                    self.additions.append(SelectedObject(o, sel, 'addition'))
+                    self.populateAdditions(sel, o)
+                ## TODO else?
+                #else:
+                #    if type != 'addition' then add...
+
+    def report(self):
+        print('compiling', self.name)
+        if self.base:
+            print('base is', self.base.name)
+        print('additions are', [a.name for a in self.additions])
+        print('dependencies are', [self.dependencies[d][i][0].name for d in \
+                self.dependencies for i in range(len(self.dependencies[d]))])
 
 def getTransparent(ob):
     if 'OriginalLineWidth' not in ob.PropertiesList:
@@ -132,6 +190,7 @@ class BaseTransform(Modifier):
         self.call_sel = None
         self.call_key = None
         self.call_status = None
+        self.selection = []
 
     def Activated(self):
         self.name = translate("draft","BaseTransform", utf8_decode=True)
@@ -155,12 +214,32 @@ class BaseTransform(Modifier):
         self.sel = Draft.getGroupContents(self.sel,addgroups=True,spaces=True,
                 noarchchild=True)
 
-        ## Create a dictionary of pairs base:object
-        self.sel_dict = selectBase(self.sel)
-        ## Clear selection and add bases and objects
-        Gui.Selection.clearSelection()
-        self.call_key = self.view.addEventCallback(
-            "SoKeyboardEvent", self.getTransform)
+        ### testing SelectedObject class
+        self.actual_selection = [SelectedObject(o, self.selection) \
+                for o in self.sel]
+        print([(o.name, o.selectionType) for o in self.selection])
+        print(len(self.selection))
+        #[o.report() for o in self.selection]
+        ### uncomment below for restore funcionality
+
+        ### Create a dictionary of pairs base:object and highlight bases
+        #self.sel_dict = selectBase(self.sel)
+        ### Clear selection and add bases and objects
+        #Gui.Selection.clearSelection()
+        #self.call_tab = self.view.addEventCallback(
+        #    "SoKeyboardEvent", self.getTransformBase)
+
+    def getTransformBase(self, info):
+        if info['Type'] == 'SoKeyboardEvent' and info['Key'] == 'TAB':
+            print(info['Key'], 'pressed!')
+            ## TODO cycle beetween selection possibilities
+            for o in self.sel_dict:
+                if type(o) != str:
+                    restoreOriginals([self.sel_dict[o]])
+            self.view.removeEventCallback("SoKeyboardEvent", self.call_tab)
+
+            self.call_key = self.view.addEventCallback(
+                "SoKeyboardEvent", self.getTransform)
 
     def getTransform(self, info):
         if info['Type'] == 'SoKeyboardEvent' and info['Key'] in self.keys:
@@ -693,4 +772,5 @@ class Scale(Modifier):
 
 bt = BaseTransform()
 bt.Activated()
+
 
