@@ -61,7 +61,8 @@ def selectionOption(sel=[]):
 
     return {
         '0_obj': {
-            'normal': pickSelection(sel, 'addition'),
+            'normal': pickSelection(sel, 'addition') + \
+                    pickSelection(sel, 'main_base'),
             'toEdit': pickSelection(sel, 'main'),
             'dirDeps': [],
             'exprDeps': pickSelection(sel, 'main_dependency')
@@ -75,7 +76,8 @@ def selectionOption(sel=[]):
             'exprDeps': pickSelection(sel, 'main_base_dependency')
             },
         '2_obj_addition': {
-            'normal': [],
+            'normal': pickSelection(sel, 'addition_base') + \
+                    pickSelection(sel, 'main_base'),
             'toEdit': pickSelection(sel, 'main') + \
                     pickSelection(sel, 'addition'),
             'dirDeps': [],
@@ -97,18 +99,18 @@ selectionVisibility = { ## Attributes for different selection conditions
         'Transparency': {'type':'Integer', 'toEdit': 80, 'dirDeps': 80, 
             'exprDeps': 80},
         'LineWidth': {'type':'Float', 'toEdit': 3, 'dirDeps': 1, 'exprDeps': 1},
-        'LineColor': {'type':'Color', 'toEdit': (0.0,1.0,0.0), 
-            'dirDeps': (1.0,0.0,0.0), 'exprDeps': (1.0,1.0,0.0)},
-        'ShapeColor': {'type':'Color', 'toEdit': (0.0,1.0,0.0), 
-            'dirDeps': (1.0,0.0,0.0), 'exprDeps': (1.0,1.0,0.0)},
+        'LineColor': {'type':'Color', 'toEdit': (1.0,1.0,1.0), 
+            'dirDeps': (0.5,0.5,0.5), 'exprDeps': (0.0,0.0,0.0)},
+        'ShapeColor': {'type':'Color', 'toEdit': (1.0,1.0,1.0), 
+            'dirDeps': (0.5,0.5,0.5), 'exprDeps': (0.0,0.0,0.0)},
         'Visibility': {'type':'Bool', 'toEdit': True, 'dirDeps': True, 
             'exprDeps': True},
         }
 
 hideAttribute = { ## Attributes for temporarily hiding objects
         'Transparency': 100,
-        'DisplayMode': 'Points',
-        'PointSize': 1.0
+        'DisplayMode': 'Wireframe',
+        'LineWidth': 1.0
         }
 
 ######
@@ -189,6 +191,7 @@ class SelectedObject:
             App.ActiveDocument.removeObject(temp_copy.Name)
 
 
+
     def report(self):
         print('compiling', self.name)
         if self.base:
@@ -228,7 +231,6 @@ class BaseTransform(Modifier):
             else:
                 self.proceed()
 
-
     def proceed(self):
         if self.call_sel:
             self.view.removeEventCallback("SoEvent",self.call_sel)
@@ -243,81 +245,86 @@ class BaseTransform(Modifier):
                 for o in self.sel]
         print([(o.name, o.selectionType) for o in self.selection])
         print(len(self.selection))
-        #[o.report() for o in self.selection]
 
-        ### Create a dictionary of pairs base:object and highlight bases
-        #self.sel_dict = selectBase(self.sel)
-        ### Clear selection and add bases and objects
-        #Gui.Selection.clearSelection()
-        self.call_tab = self.view.addEventCallback(
-            "SoKeyboardEvent", self.getCompleteSelection)
+        self.getSelectionSet()
 
-    def getCompleteSelection(self, info):
-        Gui.Selection.clearSelection()
-        if info['Type'] == 'SoKeyboardEvent' and info['Key'] == 'TAB' \
-                and info['State'] == 'UP':
-            print(info['Key'], 'pressed!')
-            for so in self.selection:
-                for gt in so.ghost:
+        self.call_key = self.view.addEventCallback(
+            "SoKeyboardEvent", self.switch)
+
+    def getSelectionSet(self):
+        for so in self.selection:
+            for gt in so.ghost:
+                if so.ghost[gt].switch:
                     so.ghost[gt].off()
-            self.sel_opt_no = (self.sel_opt_no + 1) % len(self.sel_options)
-            no  = self.sel_opt_no
-            possible_sel = selectionOption(self.selection)
-            print(self.sel_options[no])
-            print(possible_sel[self.sel_options[no]])
-            chosen_selection = possible_sel[self.sel_options[no]]
-            for st in chosen_selection:
-                for so in chosen_selection[st]:
-                    so.hide()
-                    so.ghost[st].on()
+        self.sel_opt_no = (self.sel_opt_no + 1) % len(self.sel_options)
+        no  = self.sel_opt_no
+        self.possible_selections = selectionOption(self.selection)
+        print(self.sel_options[no])
+        print(self.possible_selections[self.sel_options[no]])
+        self.chosen_selection = self.possible_selections[
+                self.sel_options[no]]
+        for st in self.chosen_selection:
+            for so in self.chosen_selection[st]:
+                so.hide()
+                so.ghost[st].on()
+                if st == 'toEdit':
+                    so.ghost[st].raiseTracker()
 
+    def switch(self,info):
+        if info['Type'] == 'SoKeyboardEvent' and info['Key'] == 'SPACE' \
+                and info['State'] == 'UP' and info['CtrlDown'] == True:
+                    print(info['Key'], 'pressed!')
+                    self.cycleSelection()
         elif info['Type'] == 'SoKeyboardEvent' and info['Key'] == 'q' \
                 and info['State'] == 'UP':
-            print(info['Key'], 'pressed!')
-            Gui.Selection.clearSelection()
-            for so in self.selection:
-                for gt in so.ghost:
+                    print(info['Key'], 'pressed!')
+                    self.stopHightlight()
+        elif info['Type'] == 'SoKeyboardEvent' and info['Key'] in self.keys \
+                and info['State'] == 'UP':
+                    print(info['Key'], 'pressed!')
+                    self.getTransform(info['Key'])
+
+    def cycleSelection(self):
+        Gui.Selection.clearSelection()
+        self.getSelectionSet()
+
+    def stopHightlight(self):
+        Gui.Selection.clearSelection()
+        for so in self.selection:
+            for gt in so.ghost:
+                if so.ghost[gt].switch:
                     so.ghost[gt].off()
-                so.show()
-            self.view.removeEventCallback("SoKeyboardEvent", self.call_tab)
+            so.show()
+        self.view.removeEventCallback("SoKeyboardEvent", self.call_key)
 
+    def getTransform(self, key):
+        self.view.removeEventCallback("SoKeyboardEvent", self.call_key)
 
-    def getTransformBase(self, info):
-        if info['Type'] == 'SoKeyboardEvent' and info['Key'] == 'TAB':
-            print(info['Key'], 'pressed!')
-            ## TODO cycle beetween selection possibilities
-            for o in self.sel_dict:
-                if type(o) != str:
-                    restoreOriginals([self.sel_dict[o]])
-            self.view.removeEventCallback("SoKeyboardEvent", self.call_tab)
-
-            self.call_key = self.view.addEventCallback(
-                "SoKeyboardEvent", self.getTransform)
-
-    def getTransform(self, info):
-        if info['Type'] == 'SoKeyboardEvent' and info['Key'] in self.keys:
-            print(info['Key'], 'pressed!')
-            self.view.removeEventCallback("SoKeyboardEvent", self.call_key)
-
-            ## Create transformation and activate it
-            self.transform = self.keys[info['Key']](self.sel_dict)
-            self.transform.Activated()
-            ## Check the status of transformation to restore objects' original
-            ## visualization when it finishes
-            self.call_status = \
-                    self.view.addEventCallback("SoEvent", self.status)
+        ## Create transformation and activate it
+        print(self.chosen_selection)
+        self.transform = self.keys[key](self.chosen_selection)
+        self.transform.Activated()
+        self.call_status = self.view.addEventCallback("SoEvent", self.status)
 
     def status(self, info):
         if not App.activeDraftCommand:
             ## Transformation completed
             self.view.removeEventCallback("SoEvent", self.call_status)
             ## Copy self.sel and base it on new object
-            all_selected = [b for b in self.sel_dict if type(b) != str] + \
-                [self.sel_dict[b] for b in self.sel_dict if type(b) != str] + \
-                [b for b in self.transform.copies_dict if type(b) != str] + \
-                [self.transform.copies_dict[b] for b in 
-                        self.transform.copies_dict if type(b) != str]
-            restoreOriginals(all_selected)
+            #all_selected = [b for b in self.sel_dict if type(b) != str] + \
+            #    [self.sel_dict[b] for b in self.sel_dict if type(b) != str] + \
+            #    [b for b in self.transform.copies_dict if type(b) != str] + \
+            #    [self.transform.copies_dict[b] for b in 
+            #            self.transform.copies_dict if type(b) != str]
+            print('finished')
+            Gui.Selection.clearSelection()
+            for so in self.selection:
+                print('so', so)
+                so.ghost = {}
+                #for gt in so.ghost:
+                #    if so.ghost[gt].switch:
+                #        so.ghost[gt].off()
+                so.show()
             App.activeDocument().recompute()
 
     def finish(self):
@@ -347,7 +354,14 @@ class Move(Modifier):
     def Activated(self):
         self.name = translate("draft","Move", utf8_decode=True)
         Modifier.Activated(self,self.name)
-        self.ghost = None
+        print('move sel', self.sel_dict)
+        self.ghost = {}
+        for typ in self.sel_dict:
+            if typ not in self.ghost:
+                self.ghost.update({typ:[]})
+            for o in self.sel_dict[typ]:
+                self.ghost[typ].append(o.ghost[typ])
+        print('ghost', self.ghost)
         self.proceed()
 
     def proceed(self):
@@ -356,8 +370,9 @@ class Move(Modifier):
         ## TODO check group selection
         #self.sel = Draft.getGroupContents(
         #    self.sel,addgroups=True,spaces=True,noarchchild=True)
-        self.sel = [b for b in self.sel_dict if type(b) != str] + \
-                [self.sel_dict[b] for b in self.sel_dict if type(b) != str]
+        
+        #self.sel = [b for b in self.sel_dict if type(b) != str] + \
+        #        [self.sel_dict[b] for b in self.sel_dict if type(b) != str]
 
         self.ui.pointUi(self.name)
         self.ui.modUi()
@@ -366,15 +381,16 @@ class Move(Modifier):
         self.ui.xValue.setFocus()
         self.ui.xValue.selectAll()
 
-        ## Remove selection ot avoid opacity of the ghost
-        Gui.Selection.clearSelection()
-        self.ghost = ghostTracker(self.sel)
         self.call = self.view.addEventCallback("SoEvent",self.action)
         msg(translate("draft", "Pick start point:")+"\n")
 
     def finish(self,closed=False,cont=False):
         if self.ghost:
-            self.ghost.finalize()
+            for typ in self.ghost:
+                for g in [i for i in self.ghost[typ]]:
+                    if g.switch:
+                        g.off()
+                    g.finalize()
         if cont and self.ui:
             if self.ui.continueMode:
                 todo.delayAfter(self.Activated,[])
@@ -383,20 +399,20 @@ class Move(Modifier):
     def move(self,delta,copy=False):
         "moving the real shape's bases"
         FreeCADGui.addModule("Draft")
-        if copy:
-            for b in [s for s in self.sel_dict if type(s) != str]:
-                copy_object(self.sel_dict[b], self.copies_dict, self.sel_dict)
-            to_edit = {k:self.copies_dict[k] for k in self.copies_dict \
-                    if type(k) != str}
-        else:
-            to_edit = {k:self.sel_dict[k] for k in self.sel_dict \
-                    if type(k) != str}
+        #if copy:
+        #    for b in [s for s in self.sel_dict if type(s) != str]:
+        #        copy_object(self.sel_dict[b], self.copies_dict, self.sel_dict)
+        #    to_edit = {k:self.copies_dict[k] for k in self.copies_dict \
+        #            if type(k) != str}
+        #else:
+        to_edit = [o for typ in self.sel_dict for o in self.sel_dict[typ] \
+                if typ == 'toEdit']
 
         sel = '['
         for o in to_edit:
             if len(sel) > 1:
                 sel += ','
-            sel += 'FreeCAD.ActiveDocument.'+o.Name
+            sel += 'FreeCAD.ActiveDocument.'+o.name
         sel += ']'
 
         self.commit(translate("draft","Move"),
@@ -409,15 +425,18 @@ class Move(Modifier):
             if arg["Key"] == "ESCAPE":
                 self.finish()
         elif arg["Type"] == "SoLocation2Event": #mouse movement detection
-            if self.ghost:
-                self.ghost.off()
+            #if self.ghost:
+            #    self.ghost.off()
             self.point,ctrlPoint,info = getPoint(self,arg)
             if (len(self.node) > 0):
                 last = self.node[len(self.node)-1]
                 delta = self.point.sub(last)
                 if self.ghost:
-                    self.ghost.move(delta)
-                    self.ghost.on()
+                    for typ in self.ghost:
+                        if typ == 'toEdit' or typ == 'dirDeps':
+                            for g in [i for i in self.ghost[typ]]:
+                                g.move(delta)
+                                g.on()
             if self.extendedCopy:
                 if not hasMod(arg,MODALT): self.finish()
             redraw3DView()
@@ -429,7 +448,9 @@ class Move(Modifier):
                         self.node.append(self.point)
                         self.ui.isRelative.show()
                         if self.ghost:
-                            self.ghost.on()
+                            for typ in self.ghost:
+                                for g in [i for i in self.ghost[typ]]:
+                                    g.on()
                         msg(translate("draft", "Pick end point:")+"\n")
                         if self.planetrack:
                             self.planetrack.set(self.point)
