@@ -8,8 +8,10 @@ from DraftGui import todo, translate, utf8_decode
 from FreeCAD import Vector
 from DraftTools import Modifier, msg, selectObject, plane, \
         getPoint, redraw3DView, hasMod, MODALT, DraftVecUtils
-from DraftTrackers import ghostTracker, arcTracker
+from DraftTrackers import Tracker, ghostTracker, arcTracker
 import re
+from pivy import coin
+from pivy.coin import *
 
 ### Utilities ###
 
@@ -18,40 +20,6 @@ normalizeNormal = lambda obj: obj.Normal if obj.Normal != App.Vector(0,0,0) \
 
 pickSelection = lambda sel, sel_type: \
         [o for o in sel if o.selectionType == sel_type]
-
-def object_copy(obj, copies_dict):
-    new_obj = App.ActiveDocument.copyObject(obj)
-    if 'Base' in obj.PropertiesList and obj.Base != None:
-        new_base = App.ActiveDocument.copyObject(obj.Base)
-    else:
-        new_base = new_obj
-    new_obj.Base = new_base
-    copies_dict[new_base] = new_obj
-    copies_dict['originals'].update({obj: new_obj})
-    return new_obj
-
-def copy_object(ob, copies_dict, sel_dict={}):
-    if 'originals' not in copies_dict:
-        copies_dict.update({'originals':{}})
-    ## if ob has no additions return its copy
-    if 'Additions' not in ob.PropertiesList or len(ob.Additions) == 0:
-        ## it must not be an additions of something else and 
-        ## no copies of it has been done yet
-        if ob not in sel_dict['additions'] or \
-                ob not in copies_dict['originals']:
-            return object_copy(ob, copies_dict)
-        else:
-            ## if copy has been done before return that one
-            return copies_dict['originals'][ob]
-    else:
-        ## if ob has addition create a copy of it and of its additions as well
-        # then add them to it
-        new_obj = object_copy(ob, copies_dict)
-        new_obj.Additions = []
-        ## TODO handle subtractions too
-        for o in ob.Additions:
-            inner_obj = copy_object(o, copies_dict, sel_dict)
-            new_obj.Additions = new_obj.Additions + [inner_obj]
 
 def selectionOption(sel=[]):
     ''' Entities are collected as three lists: 
@@ -96,15 +64,13 @@ def selectionOption(sel=[]):
     }
 
 selectionVisibility = { ## Attributes for different selection conditions
-        'Transparency': {'type':'Integer', 'toEdit': 80, 'dirDeps': 80, 
-            'exprDeps': 80},
-        'LineWidth': {'type':'Float', 'toEdit': 3, 'dirDeps': 1, 'exprDeps': 1},
-        'LineColor': {'type':'Color', 'toEdit': (1.0,1.0,1.0), 
-            'dirDeps': (0.5,0.5,0.5), 'exprDeps': (0.0,0.0,0.0)},
-        'ShapeColor': {'type':'Color', 'toEdit': (1.0,1.0,1.0), 
-            'dirDeps': (0.5,0.5,0.5), 'exprDeps': (0.0,0.0,0.0)},
-        'Visibility': {'type':'Bool', 'toEdit': True, 'dirDeps': True, 
-            'exprDeps': True},
+        'Transparency': {'toEdit': .80, 'dirDeps': .80, 'exprDeps': .80},
+        'LineTransparency': {'toEdit': .0, 'dirDeps': .0, 'exprDeps': .0},
+        'LineWidth': {'toEdit': 3, 'dirDeps': 1, 'exprDeps': 1},
+        'LineColor': {'toEdit': (1.0,1.0,1.0), 'dirDeps': (0.5,0.5,0.5), 
+            'exprDeps': (0.0,0.0,0.0)},
+        'ShapeColor': {'toEdit': (1.0,1.0,1.0), 'dirDeps': (0.5,0.5,0.5), 
+            'exprDeps': (0.0,0.0,0.0)},
         }
 
 hideAttribute = { ## Attributes for temporarily hiding objects
@@ -115,32 +81,77 @@ hideAttribute = { ## Attributes for temporarily hiding objects
 
 ######
 
+class multiGhostTracker(ghostTracker):
+
+    def __init__(self, obj, sep, typ):
+        super().__init__(obj)
+        self.children = [self.children[0]]
+        self.children.append(sep)
+
+        if typ is not 'normal':
+
+            shapeColor = selectionVisibility['ShapeColor']
+            lineColor = selectionVisibility['LineColor']
+            transparency = selectionVisibility['Transparency']
+            lineTransparency = selectionVisibility['LineTransparency']
+            lineWidth = selectionVisibility['LineWidth']
+
+            search = coin.SoSearchAction()
+            search.setInterest(search.ALL )
+            search.setSearchingAll(True)
+            SoBaseKit.setSearchingChildren(True)
+
+            variations = {SoIndexedFaceSet: transparency, 
+                    SoIndexedLineSet: lineTransparency}
+
+            for sub_ob in variations:
+                search.setType(sub_ob.getClassTypeId())
+                search.apply(sep)
+                paths = search.getPaths()
+                for path in paths:
+                    if path:
+                        parent = path.getNodeFromTail(1)
+                        for ch in parent.getChildren():
+                            if ch.isOfType(SoMaterial.getClassTypeId()):
+                                ch.diffuseColor.getValues()[0].setValue(
+                                        lineColor[typ])
+                                ch.transparency.setValue(
+                                        variations[sub_ob][typ])
+                            if ch.isOfType(SoDrawStyle.getClassTypeId()):
+                                ch.lineWidth.setValue(lineWidth[typ])
+
+        Tracker.__init__(self,dotted=False,scolor=None,swidth=None,
+                children=self.children,name="ghostTracker")
+
 class SelectedObject:
     ''' A class to get all the connection between selected objects and their
     bases, additions and dependencies.'''
 
-    def __init__(self, obj, sel=[], sel_type='main'):
+    def __init__(self, obj, sel=[], sel_type='main', parent=None):
         self.obj = obj
         self.name = obj.Name
         self.selectionType = sel_type
-        self.base = SelectedObject(obj.Base, sel, sel_type + '_base') \
-                if 'Base' in self.obj.PropertiesList and obj.Base else None
+        if 'Base' in self.obj.PropertiesList and obj.Base:
+            self.base = SelectedObject(obj.Base, sel, sel_type + '_base', self)
+        ## Create a different SelectedObject with the same obj and if it
+        ## is a base yet set parent to none to avoid infinite recursive call
+        elif 'base' not in sel_type:
+            self.base = SelectedObject(obj, sel, sel_type + '_base', None)
+        else:
+            self.base = None
+        self.parent = parent
         self.additions = []
         self.dependencies = {}
         self.get_attr = lambda name, attr: \
             re.search(name + '\.(.*?)(\s|$)', attr).group(1)
         self.populateAdditions(sel)
         self.populateDependencies(sel)
-        self.gui = FreeCADGui.ActiveDocument.getObject(obj.Name)
+        self.gui = obj.ViewObject
         self.attr = {attr : getattr(self.gui, attr) for attr in hideAttribute}
         self.ghost = {}
         self.populateGhost()
         if self not in sel:
             sel.append(self)
-
-    def highlight(self, cp, typ):
-        for attr in selectionVisibility:
-            setattr(cp, attr, selectionVisibility[attr][typ])
 
     def hide(self):
         for attr in hideAttribute:
@@ -177,19 +188,24 @@ class SelectedObject:
 
     def populateGhost(self):
         ''' Create a ghost for every selection conditions '''
+        Gui.Selection.clearSelection()
+        ob = self.obj
+        visible = ob.ViewObject.Visibility
+        tempAdds = []
+        if not visible:
+            ob.ViewObject.Visibility = True
+        if 'Additions' in ob.PropertiesList and len(ob.Additions) > 0:
+            tempAdds = ob.Additions
+            ob.Additions = []
+            App.ActiveDocument.recompute()
         for typ in ['normal', 'toEdit', 'dirDeps', 'exprDeps']:
-            temp_copy = App.ActiveDocument.copyObject(self.obj)
-            ## remove addition from copy
-            if 'Additions' in temp_copy.PropertiesList:
-                temp_copy.Additions = []
-                App.ActiveDocument.recompute()
-            if typ is not 'normal':
-                self.highlight(temp_copy.ViewObject, typ)
-            ## Unhide hidden copies
-            temp_copy.ViewObject.Visibility = True
-            self.ghost.update({typ: ghostTracker(temp_copy)})
-            App.ActiveDocument.removeObject(temp_copy.Name)
-
+            separator = self.obj.ViewObject.RootNode.copy()
+            self.ghost.update({typ: multiGhostTracker(
+                self.obj, separator, typ)})
+        if len(tempAdds) > 0:
+            ob.Additions += tempAdds
+        if not visible:
+            ob.ViewObject.Visibility = False
 
 
     def report(self):
@@ -310,20 +326,11 @@ class BaseTransform(Modifier):
         if not App.activeDraftCommand:
             ## Transformation completed
             self.view.removeEventCallback("SoEvent", self.call_status)
-            ## Copy self.sel and base it on new object
-            #all_selected = [b for b in self.sel_dict if type(b) != str] + \
-            #    [self.sel_dict[b] for b in self.sel_dict if type(b) != str] + \
-            #    [b for b in self.transform.copies_dict if type(b) != str] + \
-            #    [self.transform.copies_dict[b] for b in 
-            #            self.transform.copies_dict if type(b) != str]
             print('finished')
             Gui.Selection.clearSelection()
             for so in self.selection:
-                print('so', so)
+                #print('so', so)
                 so.ghost = {}
-                #for gt in so.ghost:
-                #    if so.ghost[gt].switch:
-                #        so.ghost[gt].off()
                 so.show()
             App.activeDocument().recompute()
 
@@ -334,6 +341,38 @@ class BaseTransform(Modifier):
         self.call_status = None
         Modifier.finish(self)
 
+def replicate(to_edit):
+    to_copy = []
+    copy_adds = {}
+    for sel in to_edit:
+        new_obj = App.ActiveDocument.copyObject(sel.obj)
+        adds = sel.obj.Additions if 'Additions' in sel.obj.PropertiesList \
+                else None
+        if adds and len(adds) > 0:
+            new_obj.Additions = []
+        for attr in hideAttribute:
+            setattr(new_obj.ViewObject, attr, sel.attr[attr])
+        copy_adds.update({
+            sel.obj: {'copy':new_obj, 'additions': adds}})
+        to_copy.append(new_obj)
+        if sel.parent:
+            new_parent = App.ActiveDocument.copyObject(sel.parent.obj)
+            if 'Additions' in new_parent.PropertiesList \
+                    and len(new_parent.Additions) > 0:
+                new_parent.Additions = []
+            copy_adds.update({
+                sel.parent.obj: {'copy':new_parent, 
+                    'additions': sel.parent.obj.Additions}})
+            new_parent.Base = new_obj
+            for attr in hideAttribute:
+                setattr(new_parent.ViewObject, attr, sel.parent.attr[attr])
+    print({c.Name: copy_adds[c] for c in copy_adds})
+    for o in copy_adds:
+        if copy_adds[o]['additions']:
+            copy_adds[o]['copy'].Additions = [copy_adds[a]['copy'] \
+                    for a in copy_adds[o]['additions'] if a in copy_adds]
+    return to_copy
+
 class Move(Modifier):
     "The Draft_Move FreeCAD command definition"
 
@@ -341,7 +380,6 @@ class Move(Modifier):
         Modifier.__init__(self)
         self.copymode = False
         self.sel_dict = sel_dict
-        self.copies_dict = {}
 
     def GetResources(self):
         return {'Pixmap'  : 'Draft_Move',
@@ -371,9 +409,6 @@ class Move(Modifier):
         #self.sel = Draft.getGroupContents(
         #    self.sel,addgroups=True,spaces=True,noarchchild=True)
         
-        #self.sel = [b for b in self.sel_dict if type(b) != str] + \
-        #        [self.sel_dict[b] for b in self.sel_dict if type(b) != str]
-
         self.ui.pointUi(self.name)
         self.ui.modUi()
         if self.copymode:
@@ -399,20 +434,18 @@ class Move(Modifier):
     def move(self,delta,copy=False):
         "moving the real shape's bases"
         FreeCADGui.addModule("Draft")
-        #if copy:
-        #    for b in [s for s in self.sel_dict if type(s) != str]:
-        #        copy_object(self.sel_dict[b], self.copies_dict, self.sel_dict)
-        #    to_edit = {k:self.copies_dict[k] for k in self.copies_dict \
-        #            if type(k) != str}
-        #else:
-        to_edit = [o for typ in self.sel_dict for o in self.sel_dict[typ] \
-                if typ == 'toEdit']
+        sel_to_edit = [o for typ in self.sel_dict \
+                for o in self.sel_dict[typ] if typ == 'toEdit']
+        if copy:
+            obj_to_edit = replicate(sel_to_edit)
+        else:
+            obj_to_edit = [s.obj for s in sel_to_edit]
 
         sel = '['
-        for o in to_edit:
+        for o in obj_to_edit:
             if len(sel) > 1:
                 sel += ','
-            sel += 'FreeCAD.ActiveDocument.'+o.name
+            sel += 'FreeCAD.ActiveDocument.' + o.Name
         sel += ']'
 
         self.commit(translate("draft","Move"),
@@ -848,3 +881,101 @@ bt = BaseTransform()
 bt.Activated()
 
 
+def traverse_structure():
+    sg = FreeCADGui.ActiveDocument.ActiveView.getSceneGraph()
+    obj = App.ActiveDocument.Structure
+    sep = coin.SoSeparator()
+    col = coin.SoBaseColor()
+    col.rgb=(1,0,0)
+    objNode = obj.ViewObject.RootNode.copy()
+    for fi in objNode.getChildren():
+        print(fi)
+        if (fi.getChildren()):
+            for ffi in fi.getChildren():
+                print('\t', ffi)
+                if (ffi.getChildren()):
+                    for fffi in ffi.getChildren():
+                        print('\t\t', fffi)
+                        if (fffi.getChildren()):
+                            for ffffi in fffi.getChildren():
+                                #if ffffi.isOfType(SoMaterial.getClassTypeId()):
+                                    #print('°°°°°°°°°°°°°°°°°°°°°')
+                                    #print(ffffi.diffuseColor.getValues()[0].getValue())
+                                    #ffffi.diffuseColor.getValues()[0].setValue(
+                                            #1.0,1.0,0.0)
+                                    #ffffi.transparency.setValue(.5)
+                                print('\t\t\t', ffffi)
+                                if (ffffi.getChildren()):
+                                    for fffffi in ffffi.getChildren():
+                                        print('\t\t\t\t', fffffi)
+    search = coin.SoSearchAction()
+
+    search.setInterest(search.ALL )
+    search.setSearchingAll(True)
+    coin.SoBaseKit.setSearchingChildren(True)
+
+    #search.setType(SoMaterial.getClassTypeId())
+    search.setType(SoIndexedLineSet.getClassTypeId())
+    search.apply(objNode)
+    paths = search.getPaths()
+    numPaths = paths.getLength()
+    print('paths are', numPaths)
+    print('\n\n\n')
+    for path in paths:
+        print(path.getTail())
+        print('sibling of')
+        parent = path.getNodeFromTail(1)
+        for ch in parent.getChildren():
+            print(ch)
+        print('\n\n\n')
+    #    path.getTail().diffuseColor.getValues()[0].setValue(1.0,1.0,0.0)
+    #    path.getTail().transparency.setValue(.8)
+    print('\n\n\n')
+
+    #sg.addChild(objNode)
+
+traverse_structure()
+
+## 
+## 
+## sep.addChild(objNode)
+## #sep.getChildren()[0].addChild(col)
+## #node = coin.SoAnnotation()
+## #node.addChild(col)
+## #node.addChild(sep)
+## sg.addChild(sep)
+## #print([ch for ch in sep.getChildren()[0]])
+## #print([ch for ch in sep.getChildren()[0][2]])
+## search = coin.SoSearchAction()
+## search.setType(SoIndexedFaceSet.getClassTypeId())
+## search.apply(sep)
+## print(search.getPath())
+## sg.removeChild(sep)
+## 
+## #sg = FreeCADGui.ActiveDocument.ActiveView.getSceneGraph()
+## #col = coin.SoBaseColor()
+## #col.rgb=(1,0,0)
+## #trans = coin.SoTranslation()
+## #trans.translation.setValue([0,0,0])
+## #transform = coin.SoTransform()
+## #cub = coin.SoCube()
+## #myCustomNode = coin.SoSeparator()
+## #myCustomNode.addChild(col)
+## #myCustomNode.addChild(trans)
+## #myCustomNode.addChild(cub)
+## #sg.addChild(myCustomNode)
+## #sg.removeChild(myCustomNode)
+## 
+## #search = coin.SoSearchAction()
+## #search.setType(SoCube.getClassTypeId())
+## #search.apply(sg)
+## #print(search.getPath())
+## #for o in sg.getChildren():
+## #    print(o)
+## #    if o.getChildren():
+## #        for ch in o.getChildren():
+## #            if ch.isOfType(SoCube.getClassTypeId()):
+## #                print('\t', ch)
+## #                #print('\t', dir(ch.getClassTypeId()))
+## #                #print('\t', ch.getTypeId())
+## #                #print('\t', ch.getTypeId().getName(), type(ch.getTypeId().getName()))
