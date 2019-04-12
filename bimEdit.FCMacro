@@ -7,13 +7,27 @@ import FreeCAD, FreeCADGui, Draft, math, DraftGui
 from DraftGui import todo, translate, utf8_decode
 from FreeCAD import Vector
 from DraftTools import Modifier, msg, selectObject, plane, \
-        getPoint, redraw3DView, hasMod, MODALT, DraftVecUtils
+        getPoint, redraw3DView, hasMod, MODALT, DraftVecUtils, \
+        Move, Rotate
 from DraftTrackers import Tracker, ghostTracker, arcTracker
 import re
 from pivy import coin
 from pivy.coin import *
 
 ### Utilities ###
+
+## To check the coin tree
+def traverse_node(node, out=''):
+    if not node.getChildren():
+        pass
+    else:
+        for nd in node.getChildren():
+            print(out + str(nd))
+            traverse_node(nd, out+'\t')
+
+## obj = Gui.Selection.getSelection()[0]
+## objNode = obj.ViewObject.RootNode
+## traverse_node(objNode)
 
 normalizeNormal = lambda obj: obj.Normal if obj.Normal != App.Vector(0,0,0) \
         else App.Vector(0,0,1)
@@ -22,7 +36,8 @@ pickSelection = lambda sel, sel_type: \
         [o for o in sel if o.selectionType == sel_type]
 
 def selectionOption(sel=[]):
-    ''' Entities are collected as three lists: 
+    ''' Entities are collected as four lists: 
+     - normal (nothing happens to them)
      - to edit (actual editing objects), 
      - directed dependencies (objects based on selection),
      - expressions dependencies (dependencies called by expressions) '''
@@ -65,12 +80,13 @@ def selectionOption(sel=[]):
 
 selectionVisibility = { ## Attributes for different selection conditions
         'Transparency': {'toEdit': .80, 'dirDeps': .80, 'exprDeps': .80},
-        'LineTransparency': {'toEdit': .0, 'dirDeps': .0, 'exprDeps': .0},
+        'LineTransparency': {'toEdit': .0, 'dirDeps': .0, 'exprDeps': 1.0},
         'LineWidth': {'toEdit': 3, 'dirDeps': 1, 'exprDeps': 1},
-        'LineColor': {'toEdit': (1.0,1.0,1.0), 'dirDeps': (0.5,0.5,0.5), 
-            'exprDeps': (0.0,0.0,0.0)},
-        'ShapeColor': {'toEdit': (1.0,1.0,1.0), 'dirDeps': (0.5,0.5,0.5), 
-            'exprDeps': (0.0,0.0,0.0)},
+        'FaceLineWidth': {'toEdit': 2, 'dirDeps': 1, 'exprDeps': 1},
+        'LineColor': {'toEdit': (1.0,1.0,1.0), 'dirDeps': (1.0,1.0,1.0), 
+            'exprDeps': (1.0,1.0,1.0)},
+        'FaceColor': {'toEdit': (1.0,.0,.0), 'dirDeps': (1.0,.0,.0), 
+            'exprDeps': (1.0,.0,.0)},
         }
 
 hideAttribute = { ## Attributes for temporarily hiding objects
@@ -86,23 +102,35 @@ class multiGhostTracker(ghostTracker):
     def __init__(self, obj, sep, typ):
         super().__init__(obj)
         self.children = [self.children[0]]
-        self.children.append(sep)
-
+        self.node = sep
         if typ is not 'normal':
+            self.node = SoAnnotation()
+            self.node.addChild(sep)
 
-            shapeColor = selectionVisibility['ShapeColor']
             lineColor = selectionVisibility['LineColor']
+            faceColor = selectionVisibility['FaceColor']
+
             transparency = selectionVisibility['Transparency']
             lineTransparency = selectionVisibility['LineTransparency']
             lineWidth = selectionVisibility['LineWidth']
+            faceLineWidth = selectionVisibility['FaceLineWidth']
 
             search = coin.SoSearchAction()
             search.setInterest(search.ALL )
             search.setSearchingAll(True)
             SoBaseKit.setSearchingChildren(True)
 
-            variations = {SoIndexedFaceSet: transparency, 
-                    SoIndexedLineSet: lineTransparency}
+            variations = {
+                    SoIndexedFaceSet: {
+                        'transparency': transparency,
+                        'lineWidth': faceLineWidth},
+                    SoIndexedLineSet: {
+                        'transparency': lineTransparency,
+                        'lineWidth': lineWidth},
+                    SoPointSet: {
+                        'transparency': lineTransparency,
+                        'lineWidth': lineWidth}
+                    }
 
             for sub_ob in variations:
                 search.setType(sub_ob.getClassTypeId())
@@ -116,12 +144,23 @@ class multiGhostTracker(ghostTracker):
                                 ch.diffuseColor.getValues()[0].setValue(
                                         lineColor[typ])
                                 ch.transparency.setValue(
-                                        variations[sub_ob][typ])
+                                        variations[sub_ob]['transparency'][typ])
+                                ch.emissiveColor.getValues()[0].setValue(
+                                        faceColor[typ])
+                            if ch.isOfType(SoShapeHints.getClassTypeId()):
+                                ch.vertexOrdering.setValue(1)
                             if ch.isOfType(SoDrawStyle.getClassTypeId()):
-                                ch.lineWidth.setValue(lineWidth[typ])
+                                ch.lineWidth.setValue(
+                                        variations[sub_ob]['lineWidth'][typ])
+
+
+        self.children.append(self.node)
 
         Tracker.__init__(self,dotted=False,scolor=None,swidth=None,
                 children=self.children,name="ghostTracker")
+
+
+
 
 class SelectedObject:
     ''' A class to get all the connection between selected objects and their
@@ -139,6 +178,8 @@ class SelectedObject:
             self.base = SelectedObject(obj, sel, sel_type + '_base', None)
         else:
             self.base = None
+        self.isDependency = True if 'dependency' in self.selectionType \
+                else False
         self.parent = parent
         self.additions = []
         self.dependencies = {}
@@ -149,17 +190,20 @@ class SelectedObject:
         self.gui = obj.ViewObject
         self.attr = {attr : getattr(self.gui, attr) for attr in hideAttribute}
         self.ghost = {}
-        self.populateGhost()
+        if self.isDependency:
+            self.populateGhost()
         if self not in sel:
             sel.append(self)
 
     def hide(self):
-        for attr in hideAttribute:
-            setattr(self.gui, attr, hideAttribute[attr])
+        if not self.isDependency:
+            for attr in hideAttribute:
+                setattr(self.gui, attr, hideAttribute[attr])
 
     def show(self):
-        for attr in hideAttribute:
-            setattr(self.gui, attr, self.attr[attr])
+        if not self.isDependency:
+            for attr in hideAttribute:
+                setattr(self.gui, attr, self.attr[attr])
 
     def populateDependencies(self, sel):
         for dep in self.obj.InList:
@@ -199,6 +243,7 @@ class SelectedObject:
             ob.Additions = []
             App.ActiveDocument.recompute()
         for typ in ['normal', 'toEdit', 'dirDeps', 'exprDeps']:
+            #if 'Part2DObject' in self.obj.TypeId:
             separator = self.obj.ViewObject.RootNode.copy()
             self.ghost.update({typ: multiGhostTracker(
                 self.obj, separator, typ)})
@@ -222,9 +267,9 @@ class BaseTransform(Modifier):
     def __init__(self):
         Modifier.__init__(self)
         self.keys = {
-                'g': lambda x: Move(x),
-                'r': lambda x: Rotate(x),
-                's': lambda x: Scale(x),
+                'g': lambda x: bimMove(x),
+                'r': lambda x: bimRotate(x),
+                #'s': lambda x: Scale(x),
                 }
         self.call_sel = None
         self.call_key = None
@@ -257,40 +302,52 @@ class BaseTransform(Modifier):
         ## self.actual_selection is what the user clicked
         ## self.selection is the actual selection extended to bases, 
         ## additions and dependencies
+        print([o.Name for o in self.sel if 'Part2DObject' not in o.TypeId])
+        print([o.Name for o in self.sel if 'Part2DObject' in o.TypeId])
         self.actual_selection = [SelectedObject(o, self.selection) \
                 for o in self.sel]
-        print([(o.name, o.selectionType) for o in self.selection])
-        print(len(self.selection))
+        for o in self.selection:
+            if 'Part2DObject' not in o.obj.TypeId and not o.isDependency :
+                o.populateGhost()
+        for o in self.selection:
+            if 'Part2DObject' in o.obj.TypeId and not o.isDependency:
+                o.populateGhost()
+        Gui.Selection.clearSelection()
 
         self.getSelectionSet()
-
         self.call_key = self.view.addEventCallback(
-            "SoKeyboardEvent", self.switch)
+            "SoKeyboardEvent", self.key_switch)
 
     def getSelectionSet(self):
         for so in self.selection:
             for gt in so.ghost:
                 if so.ghost[gt].switch:
                     so.ghost[gt].off()
-        self.sel_opt_no = (self.sel_opt_no + 1) % len(self.sel_options)
         no  = self.sel_opt_no
+        self.sel_opt_no = (self.sel_opt_no + 1) % len(self.sel_options)
         self.possible_selections = selectionOption(self.selection)
         print(self.sel_options[no])
-        print(self.possible_selections[self.sel_options[no]])
+        #print(self.possible_selections[self.sel_options[no]])
         self.chosen_selection = self.possible_selections[
                 self.sel_options[no]]
-        for st in self.chosen_selection:
-            for so in self.chosen_selection[st]:
+        #print(self.chosen_selection)
+        sg=Draft.get3DView().getSceneGraph()
+        for outer, st in enumerate(self.chosen_selection):
+            for inner, so in enumerate(self.chosen_selection[st]):
                 so.hide()
                 so.ghost[st].on()
-                if st == 'toEdit':
-                    so.ghost[st].raiseTracker()
+                #if st == 'toEdit':
+                #    so.ghost[st].raiseTracker()
+            ## raiseTracker seems to cause a double jumping during the first 
+            ## selection cycles between sel_opions
+            ## to mitigate the issue self.getSelectionSet() has to be called
+            ## two times in proceed and self.sel_opt_no has to be set to -1
 
-    def switch(self,info):
+    def key_switch(self,info):
         if info['Type'] == 'SoKeyboardEvent' and info['Key'] == 'SPACE' \
                 and info['State'] == 'UP' and info['CtrlDown'] == True:
                     print(info['Key'], 'pressed!')
-                    self.cycleSelection()
+                    self.getSelectionSet()
         elif info['Type'] == 'SoKeyboardEvent' and info['Key'] == 'q' \
                 and info['State'] == 'UP':
                     print(info['Key'], 'pressed!')
@@ -300,10 +357,6 @@ class BaseTransform(Modifier):
                     print(info['Key'], 'pressed!')
                     self.getTransform(info['Key'])
 
-    def cycleSelection(self):
-        Gui.Selection.clearSelection()
-        self.getSelectionSet()
-
     def stopHightlight(self):
         Gui.Selection.clearSelection()
         for so in self.selection:
@@ -311,6 +364,7 @@ class BaseTransform(Modifier):
                 if so.ghost[gt].switch:
                     so.ghost[gt].off()
             so.show()
+            App.ActiveDocument.recompute()
         self.view.removeEventCallback("SoKeyboardEvent", self.call_key)
 
     def getTransform(self, key):
@@ -341,7 +395,7 @@ class BaseTransform(Modifier):
         self.call_status = None
         Modifier.finish(self)
 
-def replicate(to_edit):
+def replica(to_edit):
     to_copy = []
     copy_adds = {}
     for sel in to_edit:
@@ -373,42 +427,27 @@ def replicate(to_edit):
                     for a in copy_adds[o]['additions'] if a in copy_adds]
     return to_copy
 
-class Move(Modifier):
-    "The Draft_Move FreeCAD command definition"
+
+class bimMove(Move):
+    "The bimMove FreeCAD command definition"
 
     def __init__(self, sel_dict):
-        Modifier.__init__(self)
-        self.copymode = False
+        super().__init__()
         self.sel_dict = sel_dict
-
-    def GetResources(self):
-        return {'Pixmap'  : 'Draft_Move',
-                'Accel' : "M, V",
-                'MenuText': QtCore.QT_TRANSLATE_NOOP("Draft_Move", "Move"),
-                'ToolTip': QtCore.QT_TRANSLATE_NOOP("Draft_Move",
-                    "Moves the selected objects between 2 points. \
-                            CTRL to snap, SHIFT to constrain, ALT to copy")}
 
     def Activated(self):
         self.name = translate("draft","Move", utf8_decode=True)
         Modifier.Activated(self,self.name)
-        print('move sel', self.sel_dict)
         self.ghost = {}
         for typ in self.sel_dict:
             if typ not in self.ghost:
                 self.ghost.update({typ:[]})
             for o in self.sel_dict[typ]:
                 self.ghost[typ].append(o.ghost[typ])
-        print('ghost', self.ghost)
-        self.proceed()
 
-    def proceed(self):
+        ## Proceeding
         if self.call:
             self.view.removeEventCallback("SoEvent",self.call)
-        ## TODO check group selection
-        #self.sel = Draft.getGroupContents(
-        #    self.sel,addgroups=True,spaces=True,noarchchild=True)
-        
         self.ui.pointUi(self.name)
         self.ui.modUi()
         if self.copymode:
@@ -437,7 +476,7 @@ class Move(Modifier):
         sel_to_edit = [o for typ in self.sel_dict \
                 for o in self.sel_dict[typ] if typ == 'toEdit']
         if copy:
-            obj_to_edit = replicate(sel_to_edit)
+            obj_to_edit = replica(sel_to_edit)
         else:
             obj_to_edit = [s.obj for s in sel_to_edit]
 
@@ -482,8 +521,9 @@ class Move(Modifier):
                         self.ui.isRelative.show()
                         if self.ghost:
                             for typ in self.ghost:
-                                for g in [i for i in self.ghost[typ]]:
-                                    g.on()
+                                if typ == 'toEdit' or typ == 'dirDeps':
+                                    for g in [i for i in self.ghost[typ]]:
+                                        g.on()
                         msg(translate("draft", "Pick end point:")+"\n")
                         if self.planetrack:
                             self.planetrack.set(self.point)
@@ -498,62 +538,36 @@ class Move(Modifier):
                         else:
                             self.finish(cont=True)
 
-    def numericInput(self,numx,numy,numz):
-        "this function gets called by the toolbar when valid x, y, and z \
-                have been entered there"
-        self.point = Vector(numx,numy,numz)
-        if not self.node:
-            self.node.append(self.point)
-            self.ui.isRelative.show()
-            self.ui.isCopy.show()
-            self.ghost.on()
-            msg(translate("draft", "Pick end point:")+"\n")
-        else:
-            last = self.node[-1]
-            if self.ui.isCopy.isChecked():
-                self.move(self.point.sub(last),True)
-            else:
-                self.move(self.point.sub(last))
-            self.finish()
 
-
-class Rotate(Modifier):
+class bimRotate(Modifier):
     "The Draft_Rotate FreeCAD command definition"
 
     def __init__(self, sel_dict):
-        Modifier.__init__(self)
+        super().__init__()
         self.sel_dict = sel_dict
-        self.copies_dict = {}
-
-    def GetResources(self):
-        return {'Pixmap'  : 'Draft_Rotate',
-                'Accel' : "R, O",
-                'MenuText': QtCore.QT_TRANSLATE_NOOP("Draft_Rotate", "Rotate"),
-                'ToolTip': QtCore.QT_TRANSLATE_NOOP("Draft_Rotate", 
-                    "Rotates the selected objects. CTRL to snap, SHIFT \
-                            to constrain, ALT creates a copy")}
 
     def Activated(self):
-        Modifier.Activated(self,"Rotate")
-        self.ghost = None
+        self.name = translate("draft","Rotate", utf8_decode=True)
+        Modifier.Activated(self,self.name)
+        self.ghost = {}
+        for typ in self.sel_dict:
+            if typ not in self.ghost:
+                self.ghost.update({typ:[]})
+            for o in self.sel_dict[typ]:
+                self.ghost[typ].append(o.ghost[typ])
         self.arctrack = None
-        self.proceed()
 
-    def proceed(self):
+        ## Proceeding
         if self.call:
             self.view.removeEventCallback("SoEvent",self.call)
-        self.sel = [b for b in self.sel_dict if type(b) != str] + \
-                [self.sel_dict[b] for b in self.sel_dict if type(b) != str]
         self.step = 0
         self.center = None
         self.ui.arcUi()
         self.ui.modUi()
         self.ui.setTitle("Rotate")
         self.arctrack = arcTracker()
-        ## Remove selection ot avoid opacity of the ghost
-        Gui.Selection.clearSelection()
-        self.ghost = ghostTracker(self.sel)
         self.call = self.view.addEventCallback("SoEvent",self.action)
+
         msg(translate("draft", "Pick rotation center:")+"\n")
 
     def finish(self,closed=False,cont=False):
@@ -561,7 +575,11 @@ class Rotate(Modifier):
         if self.arctrack:
             self.arctrack.finalize()
         if self.ghost:
-            self.ghost.finalize()
+            for typ in self.ghost:
+                for g in [i for i in self.ghost[typ]]:
+                    if g.switch:
+                        g.off()
+                    g.finalize()
         if cont and self.ui:
             if self.ui.continueMode:
                 todo.delayAfter(self.Activated,[])
@@ -572,17 +590,15 @@ class Rotate(Modifier):
     def rot (self,angle,copy=False):
         "rotating the real shapes'bases"
         FreeCADGui.addModule("Draft")
+        sel_to_edit = [o for typ in self.sel_dict \
+                for o in self.sel_dict[typ] if typ == 'toEdit']
         if copy:
-            for b in [s for s in self.sel_dict if type(s) != str]:
-                copy_object(self.sel_dict[b], self.copies_dict, self.sel_dict)
-            to_edit = {k:self.copies_dict[k] for k in self.copies_dict \
-                    if type(k) != str}
+            obj_to_edit = replica(sel_to_edit)
         else:
-            to_edit = {k:self.sel_dict[k] for k in self.sel_dict \
-                    if type(k) != str}
+            obj_to_edit = [s.obj for s in sel_to_edit]
 
         sel = '['
-        for o in to_edit:
+        for o in obj_to_edit:
             if len(sel) > 1:
                 sel += ','
             sel += 'FreeCAD.ActiveDocument.'+o.Name
@@ -592,14 +608,16 @@ class Rotate(Modifier):
             ['Draft.rotate('+sel+','+str(math.degrees(angle))+','+ \
                     DraftVecUtils.toString(self.center)+',axis='+ \
                     DraftVecUtils.toString(plane.axis)+',copy=False)'])
-        for o in to_edit:
-            ob = to_edit[o]
-            ## TODO extend to other types of arch objects
-            if ob.Proxy.__module__ == 'ArchWall':
-                normal = normalizeNormal(ob) 
-                rotatedNormal = DraftVecUtils.rotate(normal,angle,plane.axis)
-                ob.Normal = rotatedNormal
-                App.activeDocument().recompute()
+
+        ## TODO define behaviour for rotation around non-z axis
+        #for ob in obj_to_edit:
+        #    if ob.Proxy.__module__ == 'ArchWall':
+        #        normal = normalizeNormal(ob) 
+        #        rotatedNormal = DraftVecUtils.rotate(normal,angle,plane.axis)
+        #        print(rotatedNormal)
+        #        ob.Normal = rotatedNormal
+        #        print(ob.Normal)
+        #        App.activeDocument().recompute()
 
     def action(self,arg):
         "scene event handler"
@@ -607,8 +625,8 @@ class Rotate(Modifier):
             if arg["Key"] == "ESCAPE":
                 self.finish()
         elif arg["Type"] == "SoLocation2Event":
-            if self.ghost:
-                self.ghost.off()
+            #if self.ghost:
+            #    self.ghost.off()
             self.point,ctrlPoint,info = getPoint(self,arg)
             # this is to make sure radius is what you see on screen
             if self.center and DraftVecUtils.dist(self.point,self.center):
@@ -644,8 +662,11 @@ class Rotate(Modifier):
                     sweep = angle - self.firstangle
                 self.arctrack.setApertureAngle(sweep)
                 if self.ghost:
-                    self.ghost.rotate(plane.axis,sweep)
-                    self.ghost.on()
+                    for typ in self.ghost:
+                        if typ == 'toEdit' or typ == 'dirDeps':
+                            for g in [i for i in self.ghost[typ]]:
+                                g.rotate(plane.axis,sweep)
+                                g.on()
                 self.ui.setRadiusValue(math.degrees(sweep), 'Angle')
                 self.ui.radiusValue.setFocus()
                 self.ui.radiusValue.selectAll()
@@ -664,7 +685,10 @@ class Rotate(Modifier):
                         self.ui.labelRadius.setText("Base angle")
                         self.arctrack.setCenter(self.center)
                         if self.ghost:
-                            self.ghost.center(self.center)
+                            for typ in self.ghost:
+                                if typ == 'toEdit' or typ == 'dirDeps':
+                                    for g in [i for i in self.ghost[typ]]:
+                                        g.center(self.center)
                         self.step = 1
                         msg(translate("draft", "Pick base angle:")+"\n")
                         if self.planetrack:
@@ -675,7 +699,10 @@ class Rotate(Modifier):
                         self.arctrack.on()
                         self.arctrack.setStartPoint(self.point)
                         if self.ghost:
-                            self.ghost.on()
+                            for typ in self.ghost:
+                                if typ == 'toEdit' or typ == 'dirDeps':
+                                    for g in [i for i in self.ghost[typ]]:
+                                        g.on()
                         self.step = 2
                         msg(translate("draft", "Pick rotation angle:")+"\n")
                     else:
@@ -697,285 +724,7 @@ class Rotate(Modifier):
                         else:
                             self.finish(cont=True)
 
-    def numericInput(self,numx,numy,numz):
-        "this function gets called by the toolbar when valid x, y, and z \
-                have been entered there"
-        self.center = Vector(numx,numy,numz)
-        self.node = [self.center]
-        self.arctrack.setCenter(self.center)
-        if self.ghost:
-            self.ghost.center(self.center)
-        self.ui.radiusUi()
-        self.ui.hasFill.hide()
-        self.ui.labelRadius.setText("Base angle")
-        self.step = 1
-        msg(translate("draft", "Pick base angle:")+"\n")
-
-    def numericRadius(self,rad):
-        "this function gets called by the toolbar when valid radius have \
-                been entered there"
-        if (self.step == 1):
-            self.ui.labelRadius.setText("Rotation")
-            self.firstangle = math.radians(rad)
-            self.arctrack.setStartAngle(self.firstangle)
-            self.arctrack.on()
-            if self.ghost:
-                self.ghost.on()
-            self.step = 2
-            msg(translate("draft", "Pick rotation angle:")+"\n")
-        else:
-            self.rot(math.radians(rad),self.ui.isCopy.isChecked())
-            self.finish(cont=True)
-
-
-class Scale(Modifier):
-    '''The Draft_Scale FreeCAD command definition.
-    This tool scales the selected objects from a base point.'''
-
-    def __init__(self, sel_dict):
-        Modifier.__init__(self)
-        self.sel_dict = sel_dict
-        self.copies_dict = {}
-
-    def GetResources(self):
-        return {'Pixmap'  : 'Draft_Scale',
-                'Accel' : "S, C",
-                'MenuText': QtCore.QT_TRANSLATE_NOOP("Draft_Scale", "Scale"),
-                'ToolTip': QtCore.QT_TRANSLATE_NOOP("Draft_Scale", 
-                    "Scales the selected objects from a base point. \
-                            CTRL to snap, SHIFT to constrain, ALT to copy")}
-
-    def Activated(self):
-        self.name = translate("draft","Scale", utf8_decode=True)
-        Modifier.Activated(self,self.name)
-        self.ghost = None
-        self.proceed()
-
-    def proceed(self):
-        if self.call:
-            self.view.removeEventCallback("SoEvent",self.call)
-        self.sel = [b for b in self.sel_dict if type(b) != str] + \
-                [self.sel_dict[b] for b in self.sel_dict if type(b) != str]
-        self.refs = []
-        self.ui.pointUi(self.name)
-        self.ui.modUi()
-        self.ui.xValue.setFocus()
-        self.ui.xValue.selectAll()
-        ## Remove selection ot avoid opacity of the ghost
-        Gui.Selection.clearSelection()
-        self.ghost = ghostTracker(self.sel)
-        self.pickmode = False
-        self.task = None
-        self.call = self.view.addEventCallback("SoEvent",self.action)
-        msg(translate("draft", "Pick base point:")+"\n")
-
-    def pickRef(self):
-        self.pickmode = True
-        if self.node:
-            self.node = self.node[:1] # remove previous picks
-        msg(translate("draft", "Pick reference distance from base point:")+"\n")
-        self.call = self.view.addEventCallback("SoEvent",self.action)
-
-    def finish(self,closed=False,cont=False):
-        Modifier.finish(self)
-        if self.ghost:
-            self.ghost.finalize()
-
-    def scale(self,x,y,z,rel,mode):
-        delta = Vector(x,y,z)
-        if rel:
-            delta = FreeCAD.DraftWorkingPlane.getGlobalCoords(delta)
-        if mode == 0:
-            copy = False
-            legacy = False
-        elif mode == 1:
-            copy = False
-            legacy = True
-        elif mode == 2:
-            copy = True
-            legacy = True
-        "moving the real shapes"
-        FreeCADGui.addModule("Draft")
-        if copy:
-            for b in self.sel_dict:
-                if type(b) != str:
-                    copy_object(self.sel_dict[b], self.copies_dict,
-                            self.sel_dict)
-        to_edit = self.copies_dict if copy else \
-                {k:self.sel_dict[k] for k in self.sel_dict if type(k) != str}
-
-        ## TODO handle arch object parameters
-        sel = '['
-        for o in to_edit:
-            if len(sel) > 1:
-                sel += ','
-            sel += 'FreeCAD.ActiveDocument.'+o.Name
-        sel += ']'
-
-        self.commit(translate("draft","Copy"),
-                    ['Draft.scale('+sel+',delta='+ \
-                            DraftVecUtils.toString(delta)+',center='+ \
-                            DraftVecUtils.toString(self.node[0])+ \
-                            ',copy=False,legacy='+str(legacy)+')',
-                     'FreeCAD.ActiveDocument.recompute()'])
-        self.finish()
-
-    def scaleGhost(self,x,y,z,rel):
-        delta = Vector(x,y,z)
-        if rel:
-            delta = FreeCAD.DraftWorkingPlane.getGlobalCoords(delta)
-        self.ghost.scale(delta)
-        # calculate a correction factor depending on the scaling center
-        corr = Vector(self.node[0].x,self.node[0].y,self.node[0].z)
-        corr.scale(delta.x,delta.y,delta.z)
-        corr = (corr.sub(self.node[0])).negative()
-        self.ghost.move(corr)
-        self.ghost.on()
-
-    def action(self,arg):
-        "scene event handler"
-        if arg["Type"] == "SoKeyboardEvent":
-            if arg["Key"] == "ESCAPE":
-                self.finish()
-        elif arg["Type"] == "SoLocation2Event": #mouse movement detection
-            if self.ghost:
-                self.ghost.off()
-            self.point,ctrlPoint,info = getPoint(self,arg,sym=True)
-        elif arg["Type"] == "SoMouseButtonEvent":
-            if (arg["State"] == "DOWN") and (arg["Button"] == "BUTTON1"):
-                if self.point:
-                    #self.ui.redraw()
-                    self.numericInput(self.point.x,self.point.y,self.point.z)
-
-    def numericInput(self,numx,numy,numz):
-        "this function gets called by the toolbar when a valid base point \
-                has been entered"
-        self.point = Vector(numx,numy,numz)
-        self.node.append(self.point)
-        if not self.pickmode:
-            self.ui.offUi()
-            if self.call:
-                self.view.removeEventCallback("SoEvent",self.call)
-            self.task = DraftGui.ScaleTaskPanel()
-            self.task.sourceCmd = self
-            DraftGui.todo.delay(FreeCADGui.Control.showDialog,self.task)
-            if self.ghost:
-                self.ghost.on()
-        elif len(self.node) == 2:
-            msg(translate("draft", "Pick new distance from base point:")+"\n")
-        elif len(self.node) == 3:
-            if hasattr(FreeCADGui,"Snapper"):
-                FreeCADGui.Snapper.off()
-            if self.call:
-                self.view.removeEventCallback("SoEvent",self.call)
-            d1 = (self.node[1].sub(self.node[0])).Length
-            d2 = (self.node[2].sub(self.node[0])).Length
-            #print d2,"/",d1,"=",d2/d1
-            if hasattr(self,"task"):
-                if self.task:
-                    self.task.lock.setChecked(True)
-                    self.task.setValue(d2/d1)
 
 
 bt = BaseTransform()
 bt.Activated()
-
-
-def traverse_structure():
-    sg = FreeCADGui.ActiveDocument.ActiveView.getSceneGraph()
-    obj = App.ActiveDocument.Structure
-    sep = coin.SoSeparator()
-    col = coin.SoBaseColor()
-    col.rgb=(1,0,0)
-    objNode = obj.ViewObject.RootNode.copy()
-    for fi in objNode.getChildren():
-        print(fi)
-        if (fi.getChildren()):
-            for ffi in fi.getChildren():
-                print('\t', ffi)
-                if (ffi.getChildren()):
-                    for fffi in ffi.getChildren():
-                        print('\t\t', fffi)
-                        if (fffi.getChildren()):
-                            for ffffi in fffi.getChildren():
-                                #if ffffi.isOfType(SoMaterial.getClassTypeId()):
-                                    #print('°°°°°°°°°°°°°°°°°°°°°')
-                                    #print(ffffi.diffuseColor.getValues()[0].getValue())
-                                    #ffffi.diffuseColor.getValues()[0].setValue(
-                                            #1.0,1.0,0.0)
-                                    #ffffi.transparency.setValue(.5)
-                                print('\t\t\t', ffffi)
-                                if (ffffi.getChildren()):
-                                    for fffffi in ffffi.getChildren():
-                                        print('\t\t\t\t', fffffi)
-    search = coin.SoSearchAction()
-
-    search.setInterest(search.ALL )
-    search.setSearchingAll(True)
-    coin.SoBaseKit.setSearchingChildren(True)
-
-    #search.setType(SoMaterial.getClassTypeId())
-    search.setType(SoIndexedLineSet.getClassTypeId())
-    search.apply(objNode)
-    paths = search.getPaths()
-    numPaths = paths.getLength()
-    print('paths are', numPaths)
-    print('\n\n\n')
-    for path in paths:
-        print(path.getTail())
-        print('sibling of')
-        parent = path.getNodeFromTail(1)
-        for ch in parent.getChildren():
-            print(ch)
-        print('\n\n\n')
-    #    path.getTail().diffuseColor.getValues()[0].setValue(1.0,1.0,0.0)
-    #    path.getTail().transparency.setValue(.8)
-    print('\n\n\n')
-
-    #sg.addChild(objNode)
-
-traverse_structure()
-
-## 
-## 
-## sep.addChild(objNode)
-## #sep.getChildren()[0].addChild(col)
-## #node = coin.SoAnnotation()
-## #node.addChild(col)
-## #node.addChild(sep)
-## sg.addChild(sep)
-## #print([ch for ch in sep.getChildren()[0]])
-## #print([ch for ch in sep.getChildren()[0][2]])
-## search = coin.SoSearchAction()
-## search.setType(SoIndexedFaceSet.getClassTypeId())
-## search.apply(sep)
-## print(search.getPath())
-## sg.removeChild(sep)
-## 
-## #sg = FreeCADGui.ActiveDocument.ActiveView.getSceneGraph()
-## #col = coin.SoBaseColor()
-## #col.rgb=(1,0,0)
-## #trans = coin.SoTranslation()
-## #trans.translation.setValue([0,0,0])
-## #transform = coin.SoTransform()
-## #cub = coin.SoCube()
-## #myCustomNode = coin.SoSeparator()
-## #myCustomNode.addChild(col)
-## #myCustomNode.addChild(trans)
-## #myCustomNode.addChild(cub)
-## #sg.addChild(myCustomNode)
-## #sg.removeChild(myCustomNode)
-## 
-## #search = coin.SoSearchAction()
-## #search.setType(SoCube.getClassTypeId())
-## #search.apply(sg)
-## #print(search.getPath())
-## #for o in sg.getChildren():
-## #    print(o)
-## #    if o.getChildren():
-## #        for ch in o.getChildren():
-## #            if ch.isOfType(SoCube.getClassTypeId()):
-## #                print('\t', ch)
-## #                #print('\t', dir(ch.getClassTypeId()))
-## #                #print('\t', ch.getTypeId())
-## #                #print('\t', ch.getTypeId().getName(), type(ch.getTypeId().getName()))
