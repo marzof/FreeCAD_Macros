@@ -38,7 +38,7 @@
 ## - when selection is ok you can launch the transformation pressing:
 ##      - g -> to move
 ##      - r -> to rotate
-##      - (scale, mirror and stretch will be come)
+##      - (scale, mirror and stretch will come)
 
 
 import FreeCAD, FreeCADGui, Draft, math, DraftGui
