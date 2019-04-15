@@ -27,6 +27,11 @@
 ## Notably it let the user choose which are the elements to include in the 
 ## operations (the element itself, its base, itself and its additions...) and
 ## improve copy process for based elements and elements with additions.
+##
+## To make selection process easy and clear, objects involved in transformation
+## are highlighted: beyond the chosen objects and their direct dependencies,
+## it highlight (in a lighter way) the dependencies due to parameter 
+## expressions.
 ## 
 ## This tool is (being) made for Arch objects only. It was not tested on other 
 ## type of entities.
@@ -475,6 +480,7 @@ class BaseTransform(Modifier):
 
     def finish(self):
         ## TODO Make sure it finishes when push "Close" or escape
+        App.activeDocument().recompute()
         self.call_sel = None
         self.call_key = None
         self.call_status = None
@@ -624,6 +630,28 @@ class bimMove(Move):
                             self.extendedCopy = True
                         else:
                             self.finish(cont=True)
+
+    def numericInput(self,numx,numy,numz):
+        "this function gets called by the toolbar when valid x, y, and z \
+                have been entered there"
+        self.point = Vector(numx,numy,numz)
+        if not self.node:
+            self.node.append(self.point)
+            self.ui.isRelative.show()
+            self.ui.isCopy.show()
+            for typ in self.ghost:
+                if typ == 'toEdit' or typ == 'dirDeps':
+                    for g in [i for i in self.ghost[typ]]:
+                        g.on()
+            msg(translate("draft", "Pick end point:")+"\n")
+        else:
+            last = self.node[-1]
+            if self.ui.isCopy.isChecked():
+                self.move(self.point.sub(last),True)
+            else:
+                self.move(self.point.sub(last))
+            self.finish()
+
 
 
 class bimRotate(Modifier):
@@ -810,6 +838,43 @@ class bimRotate(Modifier):
                             self.extendedCopy = True
                         else:
                             self.finish(cont=True)
+
+    def numericInput(self,numx,numy,numz):
+        "this function gets called by the toolbar when valid x, y, and z \
+                have been entered there"
+        self.center = Vector(numx,numy,numz)
+        self.node = [self.center]
+        self.arctrack.setCenter(self.center)
+        if self.ghost:
+            for typ in self.ghost:
+                if typ == 'toEdit' or typ == 'dirDeps':
+                    for g in [i for i in self.ghost[typ]]:
+                        g.center(self.center)
+        self.ui.radiusUi()
+        self.ui.hasFill.hide()
+        self.ui.labelRadius.setText("Base angle")
+        self.step = 1
+        msg(translate("draft", "Pick base angle:")+"\n")
+
+    def numericRadius(self,rad):
+        "this function gets called by the toolbar when valid radius have been entered there"
+        if (self.step == 1):
+            self.ui.labelRadius.setText("Rotation")
+            self.firstangle = math.radians(rad)
+            self.arctrack.setStartAngle(self.firstangle)
+            self.arctrack.on()
+            if self.ghost:
+                for typ in self.ghost:
+                    if typ == 'toEdit' or typ == 'dirDeps':
+                        for g in [i for i in self.ghost[typ]]:
+                            g.on()
+            self.step = 2
+            msg(translate("draft", "Pick rotation angle:")+"\n")
+        else:
+            self.rot(math.radians(rad),self.ui.isCopy.isChecked())
+            self.finish(cont=True)
+
+
 
 
 bt = BaseTransform()
