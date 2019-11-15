@@ -5,4 +5,5 @@
 !levels2ifc.FCMacro
 !selectBase.FCMacro
 !bimEdit*
+!multi_dxf_export.FCMacro
 *.orig

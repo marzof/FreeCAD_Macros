@@ -1,0 +1,100 @@
+# -*- coding: utf-8 -*-
+
+# Macro Begin: /home/mf/.FreeCAD/Macro/multi_dxf_export.FCMacro +++++++++++++++++++++++++++++++++++++++++++++++++
+
+import FreeCAD
+import importDXF, importSVG
+import Draft
+import subprocess, shlex
+import os
+
+
+os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = '/usr/lib/x86_64-linux-gnu/qt5/' + \
+        'plugins/platforms/'
+os.environ['PATH'] += '/usr/lib/x86_64-linux-gnu/qt5/bin/'
+
+dxfmerge_path = '/home/mf/softwares/qcad-pro/merge' 
+svg_to_dxf_path = '/home/mf/softwares/svgToDxf/svgToDxf.sh' 
+save_path = "/home/mf/Documents/jobs/vmcf/"
+dxf_files = []
+draw_types = {
+	"proj": {"LineWidth": 1.00, "HiddenLines": False, 
+		"ProjectionMode": u"Solid", "LineColor": (.0,.0,.0)},
+	"cut": {"LineWidth": 2.00, "HiddenLines": False, 
+		"ProjectionMode": u"Cutfaces", "LineColor": (.0,.0,.0)},
+	"hid": {"LineWidth": 1.00, "HiddenLines": True, 
+		"ProjectionMode": u"Solid", "LineColor": (0.0,0.0,0.0)}
+	}
+
+xml_opening = '<?xml version="1.0" encoding="UTF-8"?> ' + \
+        '<merge xmlns="http://qcad.org/merge/elements/1.0/" unit="Millimeter">'
+xml_item = lambda filename: '<item src="' + filename + \
+        '"><insert></insert></item>'
+xml_close = '</merge>'
+
+dxf2dwg_cmd = lambda path, filename: 'ODAFileConverter "' + path + '" "' + \
+        path + '" "ACAD2013" "DWG" "0" "0" "' + filename + '.dxf"'
+
+objs = FreeCADGui.Selection.getCompleteSelection()
+
+## If first selected element is a section plane generate the shape2DViews 
+## and export them
+if hasattr(objs[0], 'Proxy') and \
+        str(type(objs[0].Proxy)) == "<class 'ArchSectionPlane._SectionPlane'>":
+    print('Selection contains section planes')
+    for obj in objs:
+        ## Create a group in order to contain the shape2DViews
+        group = FreeCAD.ActiveDocument.addObject('App::DocumentObjectGroup')
+        group.Label = obj.Label + "_draw"
+        ## Create the shape2DViews
+        for typ in draw_types:
+            shape = Draft.makeShape2DView(obj,FreeCAD.Vector(-0.0, -0.0, 1.0))
+            shape.Label = obj.Label + "_" + typ
+            shape.ViewObject.LineWidth = draw_types[typ]["LineWidth"]
+            shape.ViewObject.LineColor = draw_types[typ]["LineColor"]
+            shape.HiddenLines = draw_types[typ]["HiddenLines"]
+            shape.ProjectionMode = draw_types[typ]["ProjectionMode"]
+            shape.FuseArch = True
+            shape.InPlace = False
+            FreeCAD.ActiveDocument.recompute()
+
+            dxf_path = save_path + shape.Label + ".dxf"
+            dxf_files.append(dxf_path)
+            ## Export in svg to keep entities on layer 0
+            #importDXF.export([shape], dxf_path)
+            svg_path = save_path + shape.Label + ".svg"
+            importSVG.export([shape], svg_path)
+            ## Convert svg to dxf
+            subprocess.call(svg_to_dxf_path + ' ' + svg_path, shell=True)
+
+            ## Move shape2dViews to group
+            shape.adjustRelativeLinks(group)
+            group.addObject(shape)
+
+		## Create the xml body and write the xml file
+        xml_body = xml_opening + ''.join([xml_item(dxf_p) for 
+            dxf_p in dxf_files]) + xml_close
+        dxf_files.clear()
+        xml_path = save_path + obj.Label + '.xml'
+        xml_file = open(xml_path, 'w')
+        xml_file.write(xml_body)
+        xml_file.close()
+
+        ## Set parameters for merging the dxf files and merge them
+        merging_parameters = '-f -o ' + save_path + obj.Label + '.dxf ' + xml_path
+        subprocess.call(dxfmerge_path + ' ' + merging_parameters, shell=True)
+        print(dxf2dwg_cmd(save_path, obj.Label))
+        subprocess.call(dxf2dwg_cmd(save_path, obj.Label), shell=True)
+
+## If first selected element is not a section plane the export directly 
+## all elements in a single svg
+else:
+    filename = '__'.join([obj.Label for obj in objs])
+    svg_path = save_path + filename + ".svg"
+    importSVG.export(objs, svg_path)
+    print(svg_to_dxf_path + ' ' + svg_path)
+    subprocess.call(svg_to_dxf_path + ' ' + svg_path, shell=True)
+    print(dxf2dwg_cmd(save_path, filename))
+    subprocess.call(dxf2dwg_cmd(save_path, filename), shell=True)
+
+del objs
